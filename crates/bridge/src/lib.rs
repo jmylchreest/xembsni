@@ -25,17 +25,17 @@ struct IconActions {
 }
 
 impl ItemActions for IconActions {
-    fn activate(&self) {
-        log_err(self.control.activate(self.icon), "activate");
+    fn activate(&self, x: i32, y: i32) {
+        log_err(self.control.activate(self.icon, x, y), "activate");
     }
-    fn secondary_activate(&self) {
+    fn secondary_activate(&self, x: i32, y: i32) {
         log_err(
-            self.control.secondary_activate(self.icon),
+            self.control.secondary_activate(self.icon, x, y),
             "secondary_activate",
         );
     }
-    fn context_menu(&self) {
-        log_err(self.control.context_menu(self.icon), "context_menu");
+    fn context_menu(&self, x: i32, y: i32) {
+        log_err(self.control.context_menu(self.icon, x, y), "context_menu");
     }
     fn scroll(&self, delta: i32, horizontal: bool) {
         log_err(self.control.scroll(self.icon, delta, horizontal), "scroll");

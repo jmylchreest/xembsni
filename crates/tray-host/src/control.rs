@@ -48,19 +48,20 @@ impl TrayControl {
         })
     }
 
-    /// Primary action (left click).
-    pub fn activate(&self, icon: IconId) -> Result<()> {
-        self.click(icon, BUTTON_LEFT)
+    /// Primary action (left click). `x`/`y` are the host-provided root
+    /// coordinates of the interaction (where a resulting menu should appear).
+    pub fn activate(&self, icon: IconId, x: i32, y: i32) -> Result<()> {
+        self.click(icon, BUTTON_LEFT, x, y)
     }
 
     /// Secondary action (middle click).
-    pub fn secondary_activate(&self, icon: IconId) -> Result<()> {
-        self.click(icon, BUTTON_MIDDLE)
+    pub fn secondary_activate(&self, icon: IconId, x: i32, y: i32) -> Result<()> {
+        self.click(icon, BUTTON_MIDDLE, x, y)
     }
 
     /// Context menu (right click) — most legacy tray icons pop their own menu.
-    pub fn context_menu(&self, icon: IconId) -> Result<()> {
-        self.click(icon, BUTTON_RIGHT)
+    pub fn context_menu(&self, icon: IconId, x: i32, y: i32) -> Result<()> {
+        self.click(icon, BUTTON_RIGHT, x, y)
     }
 
     /// Scroll by `delta` steps along the given axis (positive = up/right).
@@ -75,19 +76,27 @@ impl TrayControl {
             (true, false) => BUTTON_SCROLL_LEFT,
         };
         for _ in 0..delta.unsigned_abs().min(10) {
-            self.click(icon, button)?;
+            self.click(icon, button, 0, 0)?;
         }
         Ok(())
     }
 
-    /// Send a press+release of `button` at the centre of the icon window.
-    fn click(&self, icon: IconId, button: u8) -> Result<()> {
+    /// Send a press+release of `button` on the icon window. `root_x`/`root_y`
+    /// are the interaction's screen coordinates (from the SNI host) so the app
+    /// can place any resulting menu correctly; if zero we fall back to the
+    /// window centre.
+    fn click(&self, icon: IconId, button: u8, root_x: i32, root_y: i32) -> Result<()> {
         // Ask the server for the icon's current size so we click its centre.
         let (w, h) = match self.conn.get_geometry(icon)?.reply() {
             Ok(geo) => (geo.width, geo.height),
             Err(_) => (1, 1), // window may have vanished; harmless coordinates
         };
-        let (x, y) = ((w / 2) as i16, (h / 2) as i16);
+        let (ex, ey) = ((w / 2) as i16, (h / 2) as i16);
+        let (rx, ry) = if root_x != 0 || root_y != 0 {
+            (root_x as i16, root_y as i16)
+        } else {
+            (ex, ey)
+        };
 
         let press = ButtonPressEvent {
             response_type: x11rb::protocol::xproto::BUTTON_PRESS_EVENT,
@@ -97,10 +106,10 @@ impl TrayControl {
             root: self.root,
             event: icon,
             child: x11rb::NONE,
-            root_x: x,
-            root_y: y,
-            event_x: x,
-            event_y: y,
+            root_x: rx,
+            root_y: ry,
+            event_x: ex,
+            event_y: ey,
             state: 0u16.into(),
             same_screen: true,
         };

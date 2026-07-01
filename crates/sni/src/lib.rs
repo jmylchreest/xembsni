@@ -17,7 +17,6 @@ use std::sync::Arc;
 
 use tracing::{debug, warn};
 use zbus::object_server::SignalEmitter;
-use zbus::zvariant::OwnedObjectPath;
 use zbus::{Connection, interface};
 
 /// The SNI `IconPixmap` wire type: a list of `(width, height, ARGB32 bytes)`.
@@ -32,9 +31,9 @@ const ITEM_PATH: &str = "/StatusNotifierItem";
 /// Implemented by the bridge over the X11 side. Methods are expected to be
 /// quick and non-blocking.
 pub trait ItemActions: Send + Sync + 'static {
-    fn activate(&self);
-    fn secondary_activate(&self);
-    fn context_menu(&self);
+    fn activate(&self, x: i32, y: i32);
+    fn secondary_activate(&self, x: i32, y: i32);
+    fn context_menu(&self, x: i32, y: i32);
     fn scroll(&self, delta: i32, horizontal: bool);
 }
 
@@ -108,24 +107,21 @@ impl StatusNotifierItem {
     #[zbus(property)]
     fn item_is_menu(&self) -> bool {
         // We forward clicks to the X11 icon rather than exposing a dbusmenu.
+        // No `Menu` property is exported, so hosts fall back to calling the
+        // ContextMenu D-Bus method (which we replay onto the X11 icon).
         false
     }
 
-    #[zbus(property)]
-    fn menu(&self) -> OwnedObjectPath {
-        OwnedObjectPath::try_from("/NO_DBUSMENU").expect("valid object path")
+    fn activate(&self, x: i32, y: i32) {
+        self.actions.activate(x, y);
     }
 
-    fn activate(&self, _x: i32, _y: i32) {
-        self.actions.activate();
+    fn secondary_activate(&self, x: i32, y: i32) {
+        self.actions.secondary_activate(x, y);
     }
 
-    fn secondary_activate(&self, _x: i32, _y: i32) {
-        self.actions.secondary_activate();
-    }
-
-    fn context_menu(&self, _x: i32, _y: i32) {
-        self.actions.context_menu();
+    fn context_menu(&self, x: i32, y: i32) {
+        self.actions.context_menu(x, y);
     }
 
     fn scroll(&self, delta: i32, orientation: String) {
