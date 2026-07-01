@@ -2,5 +2,7 @@
 **/*.rs.bk
 *.pdb
 
-# Local AI/dev tooling, not part of the project.
-/.aide/
+# Local AI/dev tooling. Only the exported, git-friendly architectural
+# decisions under .aide/shared/ are tracked (see .githooks/pre-commit).
+/.aide/*
+!/.aide/shared/

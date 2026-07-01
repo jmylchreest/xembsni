@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Export aide architectural decisions into .aide/shared/ so they are versioned
+# alongside the code. One git-friendly markdown file per decision; re-exports of
+# unchanged content are byte-identical, so this only dirties the tree when a
+# decision actually changed.
+#
+# No-op when the aide CLI isn't present (e.g. fresh clones without tooling).
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+aide="$repo_root/.aide/bin/aide"
+
+[ -x "$aide" ] || exit 0
+
+"$aide" share export --decisions >/dev/null 2>&1 || exit 0
+git add -- "$repo_root/.aide/shared" 2>/dev/null || true

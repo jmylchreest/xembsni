@@ -16,9 +16,13 @@ UNITDIR ?= $(HOME)/.config/systemd/user
 
 BIN := target/release/xembsni
 
-.PHONY: all build release test check fmt clippy install uninstall clean
+.PHONY: all build release test check fmt clippy hooks install uninstall clean
 
 all: build
+
+hooks: ## Enable the repo git hooks (exports aide decisions on commit)
+	git config core.hooksPath .githooks
+	@echo "git hooks enabled (core.hooksPath=.githooks)"
 
 build release: ## Build the release binary
 	$(CARGO) build --release --bin xembsni
