@@ -1,0 +1,24 @@
+[package]
+name = "xembsni-bridge"
+description = "Glue between the X11 tray host and the SNI publisher: maps X11 icons to StatusNotifierItems."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+futures-util.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zbus.workspace = true
+xembsni-tray-host.workspace = true
+xembsni-sni.workspace = true
+
+[dev-dependencies]
+x11rb.workspace = true
+
+[lints]
+workspace = true

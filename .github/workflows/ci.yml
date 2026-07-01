@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Deny all by default; grant the minimum needed per job.
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add rustfmt
+      - run: cargo fmt --all --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup component add clippy
+      - run: cargo clippy --workspace --all-targets
+
+  test:
+    name: test (${{ matrix.rust }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # Current stable plus the declared MSRV (see rust-version in Cargo.toml).
+        rust: [stable, "1.85"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install headless X + D-Bus for tests
+        run: sudo apt-get update && sudo apt-get install -y xvfb dbus-x11
+      - run: rustup toolchain install ${{ matrix.rust }} --profile minimal
+      - run: rustup default ${{ matrix.rust }}
+      - run: cargo build --workspace --all-targets
+      # Run under a throwaway X server and D-Bus session so the X/SNI
+      # integration tests actually execute rather than skipping.
+      - run: xvfb-run -a dbus-run-session -- cargo test --workspace

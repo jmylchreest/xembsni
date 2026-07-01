@@ -1,0 +1,16 @@
+[package]
+name = "xembsni-sni"
+description = "StatusNotifierItem (SNI) publisher for xembsni: exports one org.kde.StatusNotifierItem per tray icon."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tracing.workspace = true
+zbus.workspace = true
+
+[lints]
+workspace = true

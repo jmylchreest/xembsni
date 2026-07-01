@@ -1,0 +1,6 @@
+/target
+**/*.rs.bk
+*.pdb
+
+# Local AI/dev tooling, not part of the project.
+/.aide/
