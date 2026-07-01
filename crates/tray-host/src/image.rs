@@ -115,15 +115,53 @@ pub fn to_argb32(width: u16, height: u16, data: &[u8], fmt: PixelFormat) -> Vec<
         }
     }
 
-    // Some 32-bit windows never set alpha (leaving it fully transparent, which
-    // would render invisible). If nothing is opaque, treat the icon as opaque.
-    if alpha_mask != 0 && !any_alpha {
-        for o in (0..out.len()).step_by(4) {
-            out[o] = 255;
+    if alpha_mask != 0 {
+        // 32-bit source: if alpha was never set (fully transparent), the icon
+        // would be invisible — treat it as opaque instead.
+        if !any_alpha {
+            for o in (0..out.len()).step_by(4) {
+                out[o] = 255;
+            }
         }
+    } else {
+        // Opaque source (depth < 32, e.g. a Wine tray icon on a 24-bit window):
+        // knock out a uniform background colour so it doesn't render as a
+        // solid block behind the icon.
+        chroma_key_background(&mut out, w, h);
     }
 
     out
+}
+
+/// If the four corners share one colour, treat it as the background and make
+/// every matching pixel transparent. Skips tiny images, and won't blank an icon
+/// that is entirely one colour.
+fn chroma_key_background(out: &mut [u8], w: usize, h: usize) {
+    if w < 4 || h < 4 {
+        return;
+    }
+    let rgb = |x: usize, y: usize| {
+        let o = (y * w + x) * 4;
+        (out[o + 1], out[o + 2], out[o + 3])
+    };
+    let bg = rgb(0, 0);
+    if rgb(w - 1, 0) != bg || rgb(0, h - 1) != bg || rgb(w - 1, h - 1) != bg {
+        return;
+    }
+    let total = w * h;
+    let mut cleared = 0usize;
+    for px in out.chunks_exact_mut(4) {
+        if (px[1], px[2], px[3]) == bg {
+            px[0] = 0;
+            cleared += 1;
+        }
+    }
+    // Degenerate case: the whole icon was the background colour — keep it opaque.
+    if cleared == total {
+        for px in out.chunks_exact_mut(4) {
+            px[0] = 255;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -162,5 +200,22 @@ mod tests {
         let out = to_argb32(2, 1, &data, FMT);
         assert_eq!(out[0], 0xff);
         assert_eq!(out[4], 0xff);
+    }
+
+    #[test]
+    fn chroma_keys_uniform_background() {
+        // 4x4, depth 24, black everywhere except a blue centre pixel.
+        let fmt = PixelFormat { depth: 24, ..FMT };
+        let black = [0x00u8, 0x00, 0x00, 0x00]; // B,G,R,x little-endian
+        let blue = [0xffu8, 0x00, 0x00, 0x00]; // B=255
+        let mut data = Vec::new();
+        for i in 0..16 {
+            data.extend_from_slice(if i == 5 { &blue } else { &black });
+        }
+        let out = to_argb32(4, 4, &data, fmt);
+        // Corner (0,0) background is now transparent, centre pixel stays opaque.
+        assert_eq!(out[0], 0x00, "background should be transparent");
+        assert_eq!(out[5 * 4], 0xff, "foreground should stay opaque");
+        assert_eq!(&out[5 * 4 + 1..5 * 4 + 4], &[0x00, 0x00, 0xff]);
     }
 }

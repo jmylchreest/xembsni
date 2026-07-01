@@ -10,6 +10,7 @@ x11rb::atom_manager! {
         _XEMBED,
         _XEMBED_INFO,
         _NET_WM_NAME,
+        _NET_WM_ICON,
         UTF8_STRING,
         // Private atom used to wake the blocking event loop for shutdown.
         _XEMBSNI_WAKEUP,

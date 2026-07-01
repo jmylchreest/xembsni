@@ -258,6 +258,13 @@ impl TrayHost {
                 Event::PropertyNotify(ev) if icons.contains_key(&ev.window) => {
                     if ev.atom == self.atoms._XEMBED_INFO {
                         self.on_xembed_info(ev.window, icons, on_event);
+                    } else if ev.atom == self.atoms._NET_WM_ICON {
+                        if let Some(image) = self.read_net_wm_icon(ev.window) {
+                            on_event(IconEvent::Updated {
+                                id: ev.window,
+                                image,
+                            });
+                        }
                     } else if ev.atom == self.atoms._NET_WM_NAME
                         || ev.atom == u32::from(AtomEnum::WM_NAME)
                     {
@@ -381,7 +388,17 @@ impl TrayHost {
             format,
             mapped: want_mapped,
         };
-        let image = self.capture(icon, &state);
+        // Capture what the client actually painted into its tray window; only
+        // fall back to _NET_WM_ICON (the generic *window* icon) if that fails.
+        tracing::debug!(
+            icon = format_args!("{icon:#010x}"),
+            depth = format.map(|f| f.depth),
+            bpp = format.map(|f| f.bits_per_pixel),
+            "embedding icon"
+        );
+        let image = self
+            .capture(icon, &state)
+            .or_else(|| self.read_net_wm_icon(icon));
         let meta = IconMeta {
             id: icon,
             app_id: self.read_app_id(icon),
@@ -448,7 +465,11 @@ impl TrayHost {
             format: state.format,
             mapped: state.mapped,
         };
-        if let Some(image) = self.capture(icon, &snapshot) {
+        // Prefer the app's own ARGB icon; fall back to a pixmap scrape.
+        if let Some(image) = self
+            .read_net_wm_icon(icon)
+            .or_else(|| self.capture(icon, &snapshot))
+        {
             on_event(IconEvent::Updated { id: icon, image });
         }
     }
@@ -514,6 +535,58 @@ impl TrayHost {
         let _ = self.conn.flush();
     }
 
+    /// Read the app's `_NET_WM_ICON` (ARGB) and return its largest image, if set.
+    ///
+    /// The property is a sequence of `[width, height, width*height pixels]`
+    /// blocks, one per size; each pixel is `0xAARRGGBB`.
+    fn read_net_wm_icon(&self, icon: Window) -> Option<IconImage> {
+        let reply = self
+            .conn
+            .get_property(
+                false,
+                icon,
+                self.atoms._NET_WM_ICON,
+                AtomEnum::CARDINAL,
+                0,
+                1 << 20,
+            )
+            .ok()?
+            .reply()
+            .ok()?;
+        let vals: Vec<u32> = reply.value32()?.collect();
+
+        // Scan the blocks and keep the largest image (hosts scale as needed).
+        let mut best: Option<(u32, u32, usize)> = None;
+        let mut i = 0usize;
+        while i + 2 <= vals.len() {
+            let (w, h) = (vals[i], vals[i + 1]);
+            let start = i + 2;
+            let count = (w as usize).saturating_mul(h as usize);
+            if w == 0 || h == 0 || w > 1024 || h > 1024 || start + count > vals.len() {
+                break;
+            }
+            if best.is_none_or(|(bw, bh, _)| w * h > bw * bh) {
+                best = Some((w, h, start));
+            }
+            i = start + count;
+        }
+
+        let (w, h, start) = best?;
+        let count = (w * h) as usize;
+        let mut argb32 = Vec::with_capacity(count * 4);
+        for &px in &vals[start..start + count] {
+            argb32.push((px >> 24) as u8);
+            argb32.push((px >> 16) as u8);
+            argb32.push((px >> 8) as u8);
+            argb32.push(px as u8);
+        }
+        Some(IconImage {
+            width: w as u16,
+            height: h as u16,
+            argb32,
+        })
+    }
+
     fn read_xembed_info(&self, icon: Window) -> Option<u32> {
         // `_XEMBED_INFO` has its own atom as its type (not CARDINAL), so match
         // any type rather than filtering.
@@ -543,22 +616,75 @@ impl TrayHost {
         format!("xembsni-{icon:08x}")
     }
 
+    /// A human title for the icon. Tray windows often have no title of their
+    /// own (e.g. Wine tray icons), so fall back to the title of another
+    /// top-level window owned by the same X client — usually the app's main
+    /// window (e.g. "Battle.net").
     fn read_title(&self, icon: Window) -> String {
+        if let Some(title) = self.window_title(icon) {
+            return title;
+        }
+        self.client_main_title(icon).unwrap_or_default()
+    }
+
+    /// Read `_NET_WM_NAME`/`WM_NAME` from a single window.
+    fn window_title(&self, win: Window) -> Option<String> {
         for (atom, ty) in [
             (self.atoms._NET_WM_NAME, self.atoms.UTF8_STRING),
             (u32::from(AtomEnum::WM_NAME), u32::from(AtomEnum::STRING)),
         ] {
             if let Ok(Ok(reply)) = self
                 .conn
-                .get_property(false, icon, atom, ty, 0, 1024)
+                .get_property(false, win, atom, ty, 0, 1024)
                 .map(|c| c.reply())
             {
                 if !reply.value.is_empty() {
-                    return String::from_utf8_lossy(&reply.value).into_owned();
+                    return Some(String::from_utf8_lossy(&reply.value).into_owned());
                 }
             }
         }
-        String::new()
+        None
+    }
+
+    /// Find the title of another top-level window owned by the same client as
+    /// `icon`. X resource ids from one client share their high bits, so we scan
+    /// the root's children for a same-client window with a title.
+    fn client_main_title(&self, icon: Window) -> Option<String> {
+        let mask = self.conn.setup().resource_id_mask;
+        let client_bits = icon & !mask;
+        let tree = self.conn.query_tree(self.root).ok()?.reply().ok()?;
+        // Pick the title of the largest same-client window — the app's real
+        // main window, not Wine helper windows like "Default IME" (which are
+        // tiny). Ties break toward the longer title.
+        // Wine creates internal helper windows per client; ignore their titles.
+        const WINE_HELPERS: [&str; 2] = ["Default IME", "MSCTFIME UI"];
+        let mut best: Option<(u64, String)> = None;
+        for &win in &tree.children {
+            if win & !mask != client_bits {
+                continue;
+            }
+            let Some(title) = self.window_title(win) else {
+                continue;
+            };
+            if WINE_HELPERS.contains(&title.as_str()) {
+                continue;
+            }
+            let area = self
+                .conn
+                .get_geometry(win)
+                .ok()
+                .and_then(|c| c.reply().ok())
+                .map(|g| g.width as u64 * g.height as u64)
+                .unwrap_or(0);
+            let better = match &best {
+                Some((a, t)) => area > *a || (area == *a && title.len() > t.len()),
+                None => true,
+            };
+            if better {
+                best = Some((area, title));
+            }
+        }
+        best.map(|(_, title)| title)
     }
 }
 
