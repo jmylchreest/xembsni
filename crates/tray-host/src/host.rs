@@ -235,12 +235,9 @@ impl TrayHost {
                     if ev.atom == self.atoms._XEMBED_INFO {
                         self.on_xembed_info(ev.window, icons, on_event);
                     } else if ev.atom == self.atoms._NET_WM_ICON {
-                        if let Some(image) = self.read_net_wm_icon(ev.window) {
-                            on_event(IconEvent::Updated {
-                                id: ev.window,
-                                image,
-                            });
-                        }
+                        // The window icon changed; re-derive the tray graphic
+                        // (capture-first, _NET_WM_ICON only as a fallback).
+                        self.refresh_icon(ev.window, icons, on_event);
                     } else if ev.atom == self.atoms._NET_WM_NAME
                         || ev.atom == u32::from(AtomEnum::WM_NAME)
                     {
@@ -433,18 +430,27 @@ impl TrayHost {
                 state.height = geo.height.max(1);
             }
         }
-        let snapshot = Icon {
-            container: state.container,
-            damage: state.damage,
-            width: state.width,
-            height: state.height,
-            format: state.format,
-            mapped: state.mapped,
+        self.refresh_icon(icon, icons, on_event);
+    }
+
+    /// Re-derive an icon's tray graphic and emit an [`IconEvent::Updated`].
+    ///
+    /// The composite capture is authoritative — it's what the client actually
+    /// painted into its tray window. `_NET_WM_ICON` is only a fallback for
+    /// clients that don't paint (its contents are the generic *window* icon,
+    /// e.g. Wine's blank-window graphic, not the tray icon).
+    fn refresh_icon<F: FnMut(IconEvent)>(
+        &self,
+        icon: Window,
+        icons: &HashMap<Window, Icon>,
+        on_event: &mut F,
+    ) {
+        let Some(state) = icons.get(&icon) else {
+            return;
         };
-        // Prefer the app's own ARGB icon; fall back to a pixmap scrape.
         if let Some(image) = self
-            .read_net_wm_icon(icon)
-            .or_else(|| self.capture(icon, &snapshot))
+            .capture(icon, state)
+            .or_else(|| self.read_net_wm_icon(icon))
         {
             on_event(IconEvent::Updated { id: icon, image });
         }
