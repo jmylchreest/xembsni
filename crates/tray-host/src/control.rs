@@ -98,6 +98,17 @@ impl TrayControl {
             (ex, ey)
         };
 
+        // Apps place any resulting menu at the pointer, not at our event's
+        // coordinates. Warp the X pointer to the interaction point so a menu
+        // appears by the tray. (On Wayland this is best-effort — Xwayland may
+        // ignore it when the real pointer is over a native Wayland surface.)
+        if root_x != 0 || root_y != 0 {
+            let _ = self
+                .conn
+                .warp_pointer(x11rb::NONE, self.root, 0, 0, 0, 0, rx, ry);
+            let _ = self.conn.flush();
+        }
+
         let press = ButtonPressEvent {
             response_type: x11rb::protocol::xproto::BUTTON_PRESS_EVENT,
             detail: button,

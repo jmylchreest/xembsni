@@ -40,24 +40,6 @@ const XEMBED_MAPPED: u32 = 1 << 0;
 /// Where embedded containers live: far offscreen so no compositor shows them.
 const OFFSCREEN: i16 = -16000;
 
-/// Find a 32-bit TrueColor/DirectColor (ARGB) visual on `screen`, if one exists.
-fn argb_visual(screen: &x11rb::protocol::xproto::Screen) -> Option<u32> {
-    for depth in &screen.allowed_depths {
-        if depth.depth == 32 {
-            for visual in &depth.visuals {
-                if matches!(
-                    visual.class,
-                    x11rb::protocol::xproto::VisualClass::TRUE_COLOR
-                        | x11rb::protocol::xproto::VisualClass::DIRECT_COLOR
-                ) {
-                    return Some(visual.visual_id);
-                }
-            }
-        }
-    }
-    None
-}
-
 /// Per-icon bookkeeping.
 struct Icon {
     container: Window,
@@ -139,17 +121,11 @@ impl TrayHost {
             &[TRAY_ORIENTATION_HORZ],
         )?;
 
-        // Advertise a 32-bit ARGB visual so clients (notably Wine) render their
-        // icon with a real alpha channel instead of an opaque background.
-        if let Some(visual) = argb_visual(screen) {
-            conn.change_property32(
-                PropMode::REPLACE,
-                owner,
-                atoms._NET_SYSTEM_TRAY_VISUAL,
-                AtomEnum::VISUALID,
-                &[visual],
-            )?;
-        }
+        // NB: we deliberately do NOT advertise `_NET_SYSTEM_TRAY_VISUAL`.
+        // Wine under Proton renders its tray icon *incorrectly* into a 32-bit
+        // ARGB window (a blank window frame instead of the icon), so we let it
+        // use the default 24-bit visual and knock out the opaque background
+        // ourselves via chroma-keying (see `image::to_argb32`).
 
         conn.set_selection_owner(owner, selection_atom, CURRENT_TIME)?;
         conn.flush()?;
