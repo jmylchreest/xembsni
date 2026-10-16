@@ -14,7 +14,7 @@ use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 use xembsni_bridge::BridgeOptions;
-use xembsni_tray_host::{IconEvent, TrayHost};
+use xembsni_tray_host::{IconEvent, MenuAnchor, TrayHost};
 
 const HELP: &str = "\
 xembsni — bridge XEmbed system-tray icons to StatusNotifierItem (SNI)
@@ -23,12 +23,16 @@ USAGE:
     xembsni [OPTIONS]
 
 OPTIONS:
-    -h, --help             Print this help and exit
-    -V, --version          Print version and exit
-        --ignore <app-ids> Never publish icons whose app id (WM_CLASS) is in
-                           this comma-separated list; may be repeated.
-                           For apps the desktop keeps out of the tray on
-                           purpose, e.g. --ignore fcitx
+    -h, --help               Print this help and exit
+    -V, --version            Print version and exit
+        --ignore <app-ids>   Never publish icons whose app id (WM_CLASS) is in
+                             this comma-separated list; may be repeated.
+                             For apps the desktop keeps out of the tray on
+                             purpose, e.g. --ignore fcitx
+        --menu-anchor <pos>  Where an app's menu opens when the bar sends no
+                             click coordinates (Quickshell's Activate(0, 0)):
+                             top-right (default), top-left, bottom-right or
+                             bottom-left
 
 The daemon runs in the foreground and logs to stderr. Set RUST_LOG to control
 verbosity (e.g. RUST_LOG=debug). It exits cleanly on SIGINT/SIGTERM.
@@ -37,6 +41,7 @@ verbosity (e.g. RUST_LOG=debug). It exits cleanly on SIGINT/SIGTERM.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct Options {
     ignore: Vec<String>,
+    menu_anchor: MenuAnchor,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -73,6 +78,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<CliAction, String> {
                     .filter(|id| !id.is_empty())
                     .map(String::from),
             ),
+            "--menu-anchor" => options.menu_anchor = value("--menu-anchor")?.parse()?,
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -125,7 +131,7 @@ async fn async_main(options: Options) -> anyhow::Result<()> {
     // Acquire the X11 tray selection before anything else — fail fast if
     // another tray owns it.
     let host = TrayHost::acquire()?;
-    let control = host.control()?;
+    let control = host.control()?.with_menu_anchor(options.menu_anchor);
     let waker = host.waker()?;
     info!(selection = host.selection_name(), "tray host ready");
 
@@ -198,6 +204,10 @@ mod tests {
     #[test]
     fn help_and_version_win_over_everything_else() {
         assert_eq!(parse(&["--ignore", "fcitx", "-h"]), Ok(CliAction::Help));
+        assert_eq!(
+            parse(&["--menu-anchor=top-left", "-h"]),
+            Ok(CliAction::Help)
+        );
         assert_eq!(parse(&["-V"]), Ok(CliAction::Version));
     }
 
@@ -208,6 +218,7 @@ mod tests {
             parsed,
             Ok(CliAction::Run(Options {
                 ignore: vec!["fcitx".into(), "Steam".into(), "wine".into()],
+                ..Options::default()
             }))
         );
     }
@@ -215,6 +226,26 @@ mod tests {
     #[test]
     fn ignore_needs_a_value() {
         assert!(parse(&["--ignore"]).is_err());
+    }
+
+    #[test]
+    fn menu_anchor_parses_in_both_spellings_and_rejects_unknown_corners() {
+        assert_eq!(
+            parse(&["--menu-anchor=bottom-left"]),
+            Ok(CliAction::Run(Options {
+                menu_anchor: MenuAnchor::BottomLeft,
+                ..Options::default()
+            }))
+        );
+        assert_eq!(
+            parse(&["--menu-anchor", "top-left"]),
+            Ok(CliAction::Run(Options {
+                menu_anchor: MenuAnchor::TopLeft,
+                ..Options::default()
+            }))
+        );
+        assert!(parse(&["--menu-anchor", "middle"]).is_err());
+        assert!(parse(&["--menu-anchor"]).is_err());
     }
 
     #[test]
