@@ -21,7 +21,7 @@ use x11rb::{CURRENT_TIME, NONE};
 use crate::atoms::Atoms;
 use crate::control::TrayControl;
 use crate::image::{self, PixelFormat};
-use crate::{Error, IconEvent, IconImage, IconMeta, Result};
+use crate::{Error, IconEvent, IconImage, IconMeta, OFFSCREEN, Result};
 
 /// `_NET_SYSTEM_TRAY_OPCODE` values (`data[1]`).
 const SYSTEM_TRAY_REQUEST_DOCK: u32 = 0;
@@ -36,9 +36,6 @@ const XEMBED_EMBEDDED_NOTIFY: u32 = 0;
 const XEMBED_VERSION: u32 = 0;
 /// `_XEMBED_INFO` flag: the client wants to be mapped.
 const XEMBED_MAPPED: u32 = 1 << 0;
-
-/// Where embedded containers live: far offscreen so no compositor shows them.
-const OFFSCREEN: i16 = -16000;
 
 /// Per-icon bookkeeping.
 struct Icon {

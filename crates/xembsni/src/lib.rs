@@ -13,7 +13,7 @@ use std::thread;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
-use xembsni_tray_host::{IconEvent, TrayHost};
+use xembsni_tray_host::{IconEvent, MenuAnchor, TrayHost};
 
 const HELP: &str = "\
 xembsni — bridge XEmbed system-tray icons to StatusNotifierItem (SNI)
@@ -22,25 +22,54 @@ USAGE:
     xembsni [OPTIONS]
 
 OPTIONS:
-    -h, --help       Print this help and exit
-    -V, --version    Print version and exit
+    -h, --help               Print this help and exit
+    -V, --version            Print version and exit
+        --menu-anchor <pos>  Where an app's menu opens when the bar sends no
+                             click coordinates (Quickshell's Activate(0, 0)):
+                             top-right (default), top-left, bottom-right or
+                             bottom-left
 
 The daemon runs in the foreground and logs to stderr. Set RUST_LOG to control
 verbosity (e.g. RUST_LOG=debug). It exits cleanly on SIGINT/SIGTERM.
 ";
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Options {
+    menu_anchor: MenuAnchor,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 enum CliAction {
     Help,
     Version,
+    Run(Options),
 }
 
-fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<CliAction>, String> {
-    match args.next().as_deref() {
-        None => Ok(None),
-        Some("-h" | "--help") => Ok(Some(CliAction::Help)),
-        Some("-V" | "--version") => Ok(Some(CliAction::Version)),
-        Some(other) => Err(format!("unknown argument: {other}")),
+fn parse_args(args: impl Iterator<Item = String>) -> Result<CliAction, String> {
+    let mut options = Options::default();
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        // Accept both `--flag value` and `--flag=value`.
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => {
+                (flag.to_string(), Some(value.to_string()))
+            }
+            _ => (arg.clone(), None),
+        };
+        let mut value = |name: &str| -> Result<String, String> {
+            inline
+                .clone()
+                .or_else(|| args.next())
+                .ok_or_else(|| format!("{name} needs a value"))
+        };
+        match flag.as_str() {
+            "-h" | "--help" => return Ok(CliAction::Help),
+            "-V" | "--version" => return Ok(CliAction::Version),
+            "--menu-anchor" => options.menu_anchor = value("--menu-anchor")?.parse()?,
+            other => return Err(format!("unknown argument: {other}")),
+        }
     }
+    Ok(CliAction::Run(options))
 }
 
 /// Build the Tokio runtime and run the daemon to completion.
@@ -48,28 +77,28 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<CliAction
 /// Async is used only at the outer lifecycle boundary (signals and D-Bus). The
 /// X11 event loop is synchronous and runs on a dedicated thread.
 pub fn run() -> anyhow::Result<()> {
-    match parse_args(std::env::args().skip(1)) {
-        Ok(Some(CliAction::Help)) => {
+    let options = match parse_args(std::env::args().skip(1)) {
+        Ok(CliAction::Help) => {
             print!("{HELP}");
             return Ok(());
         }
-        Ok(Some(CliAction::Version)) => {
+        Ok(CliAction::Version) => {
             println!("xembsni {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
-        Ok(None) => {}
+        Ok(CliAction::Run(options)) => options,
         Err(err) => {
             eprintln!("{err}\n\n{HELP}");
             std::process::exit(2);
         }
-    }
+    };
 
     init_tracing();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async_main())
+    runtime.block_on(async_main(options))
 }
 
 fn init_tracing() {
@@ -80,13 +109,13 @@ fn init_tracing() {
         .init();
 }
 
-async fn async_main() -> anyhow::Result<()> {
+async fn async_main(options: Options) -> anyhow::Result<()> {
     info!(version = env!("CARGO_PKG_VERSION"), "starting xembsni");
 
     // Acquire the X11 tray selection before anything else — fail fast if
     // another tray owns it.
     let host = TrayHost::acquire()?;
-    let control = host.control()?;
+    let control = host.control()?.with_menu_anchor(options.menu_anchor);
     let waker = host.waker()?;
     info!(selection = host.selection_name(), "tray host ready");
 
@@ -137,5 +166,51 @@ fn report_bridge(result: Result<anyhow::Result<()>, tokio::task::JoinError>) {
         Ok(Err(err)) => error!(%err, "bridge exited with an error"),
         Err(err) if err.is_cancelled() => {}
         Err(err) => error!(%err, "bridge task panicked"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<CliAction, String> {
+        parse_args(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn no_arguments_runs_with_defaults() {
+        assert_eq!(parse(&[]), Ok(CliAction::Run(Options::default())));
+    }
+
+    #[test]
+    fn help_and_version_win_over_everything_else() {
+        assert_eq!(
+            parse(&["--menu-anchor=top-left", "-h"]),
+            Ok(CliAction::Help)
+        );
+        assert_eq!(parse(&["-V"]), Ok(CliAction::Version));
+    }
+
+    #[test]
+    fn menu_anchor_parses_in_both_spellings_and_rejects_unknown_corners() {
+        assert_eq!(
+            parse(&["--menu-anchor=bottom-left"]),
+            Ok(CliAction::Run(Options {
+                menu_anchor: MenuAnchor::BottomLeft,
+            }))
+        );
+        assert_eq!(
+            parse(&["--menu-anchor", "top-left"]),
+            Ok(CliAction::Run(Options {
+                menu_anchor: MenuAnchor::TopLeft,
+            }))
+        );
+        assert!(parse(&["--menu-anchor", "middle"]).is_err());
+        assert!(parse(&["--menu-anchor"]).is_err());
+    }
+
+    #[test]
+    fn unknown_arguments_are_rejected() {
+        assert!(parse(&["--bogus"]).is_err());
     }
 }
