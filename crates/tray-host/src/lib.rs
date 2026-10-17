@@ -28,9 +28,9 @@ pub use host::{TrayHost, Waker};
 /// Identifier for a docked icon: its X11 window id.
 pub type IconId = u32;
 
-/// Where embedded containers live when idle: far offscreen so no compositor
-/// shows them. `TrayControl` parks a container under the pointer for the
-/// duration of a click (see `control.rs`) and sends it back here afterwards.
+/// Where embedded containers live: far offscreen so no compositor shows them.
+/// Containers never move; for a click, `TrayControl` slides the icon within
+/// its container instead (see `control.rs`).
 pub(crate) const OFFSCREEN: i16 = -16000;
 
 /// A captured icon image in ARGB32 (`[A, R, G, B]` per pixel), row-major.

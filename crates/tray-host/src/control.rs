@@ -12,14 +12,14 @@ use std::time::Duration;
 use tracing::debug;
 use x11rb::connection::Connection;
 use x11rb::protocol::xproto::{
-    AtomEnum, ButtonPressEvent, ConfigureWindowAux, ConnectionExt as _, EventMask, StackMode,
+    AtomEnum, ButtonPressEvent, ConfigureWindowAux, ConnectionExt as _, EventMask,
 };
 use x11rb::rust_connection::RustConnection;
 
-use crate::{IconId, OFFSCREEN, Result};
+use crate::{IconId, Result};
 
-/// How long a container stays parked under the pointer after a click, so the
-/// app has time to ask the server where its icon is before placing a menu.
+/// How long an icon stays slid under the interaction point after a click, so
+/// the app has time to ask the server where its icon is before placing a menu.
 const PARK_DURATION: Duration = Duration::from_millis(400);
 
 /// X11 button numbers.
@@ -171,21 +171,19 @@ impl TrayControl {
         // Some toolkits ignore the event's root coordinates and ask the server
         // where the icon window is before placing a menu (Java AWT's
         // XTrayIconPeer translates the icon's origin to root coordinates; GTK
-        // checks the pointer is over the icon). Our container sits far
-        // offscreen, so those menus would open off screen. Park the container
-        // under the interaction point for the duration of the click, then send
-        // it back offscreen.
-        let container = self.container_of(icon);
-        if let Some(container) = container {
-            self.conn.configure_window(
-                container,
-                &ConfigureWindowAux::new()
-                    .x(i32::from(rx) - i32::from(ex))
-                    .y(i32::from(ry) - i32::from(ey))
-                    .stack_mode(StackMode::ABOVE),
-            )?;
-            self.conn.flush()?;
-        }
+        // checks the pointer is over the icon). The icon sits far offscreen
+        // inside its container, so those menus would open off screen. Moving
+        // the container on screen would make the compositor map it as a window
+        // of its own (Hyprland then shows it and counts it on a workspace), so
+        // slide the icon *within* the container instead, so that its root
+        // coordinates land on the interaction point. The container clips it,
+        // nothing shows, and the compositor never hears of it. It slides back
+        // once the app has had time to read the position.
+        let slid = self.slide_icon_to(
+            icon,
+            i32::from(rx) - i32::from(ex),
+            i32::from(ry) - i32::from(ey),
+        );
 
         // Toolkits select button events on the widget that draws the icon, not
         // on the toplevel they docked (Java AWT's tray canvas is a child window
@@ -230,20 +228,34 @@ impl TrayControl {
             "sent click"
         );
 
-        if let Some(container) = container {
+        if slid {
             let conn = Arc::clone(&self.conn);
             std::thread::spawn(move || {
                 std::thread::sleep(PARK_DURATION);
-                let _ = conn.configure_window(
-                    container,
-                    &ConfigureWindowAux::new()
-                        .x(i32::from(OFFSCREEN))
-                        .y(i32::from(OFFSCREEN)),
-                );
+                let _ = conn.configure_window(icon, &ConfigureWindowAux::new().x(0).y(0));
                 let _ = conn.flush();
             });
         }
         Ok(())
+    }
+
+    /// Move `icon` inside its container so that the icon's origin lands on
+    /// the given root coordinates. Returns false when the icon has no
+    /// container of ours or the server refused.
+    fn slide_icon_to(&self, icon: IconId, root_x: i32, root_y: i32) -> bool {
+        let Some(container) = self.container_of(icon) else {
+            return false;
+        };
+        let Ok(cookie) = self.conn.get_geometry(container) else {
+            return false;
+        };
+        let Ok(geometry) = cookie.reply() else {
+            return false;
+        };
+        let aux = ConfigureWindowAux::new()
+            .x(root_x - i32::from(geometry.x))
+            .y(root_y - i32::from(geometry.y));
+        self.conn.configure_window(icon, &aux).is_ok() && self.conn.flush().is_ok()
     }
 
     /// The deepest viewable descendant of `window` containing (`x`, `y`), with
