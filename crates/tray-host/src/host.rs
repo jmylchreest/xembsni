@@ -318,6 +318,24 @@ impl TrayHost {
                     .event_mask(EventMask::STRUCTURE_NOTIFY),
             )?
             .check()?;
+        // Name the container so compositors can target it with window rules.
+        // Hyprland lists override-redirect X11 windows as clients and counts
+        // one towards the workspace it appeared on; a rule keyed on this class
+        // (pin it, never focus it) keeps the bar from showing a stray workspace.
+        self.conn.change_property8(
+            PropMode::REPLACE,
+            container,
+            AtomEnum::WM_CLASS,
+            AtomEnum::STRING,
+            b"xembsni-container\0xembsni\0",
+        )?;
+        self.conn.change_property8(
+            PropMode::REPLACE,
+            container,
+            AtomEnum::WM_NAME,
+            AtomEnum::STRING,
+            b"xembsni tray container",
+        )?;
 
         self.conn.reparent_window(icon, container, 0, 0)?;
         self.conn
