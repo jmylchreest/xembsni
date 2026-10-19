@@ -57,9 +57,29 @@ fn to_pixmap(image: &IconImage) -> Pixmap {
 }
 
 /// Run the bridge until the event stream ends or the selection is lost.
-pub async fn run(
+/// Tunables for the bridge.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BridgeOptions {
+    /// App ids (`WM_CLASS`) whose icons are never published. Case-insensitive.
+    /// For apps that already have a StatusNotifierItem of their own or that the
+    /// desktop deliberately keeps out of the tray (fcitx5 on Omarchy).
+    pub ignore: Vec<String>,
+}
+
+impl BridgeOptions {
+    fn ignores(&self, app_id: &str) -> bool {
+        self.ignore.iter().any(|id| id.eq_ignore_ascii_case(app_id))
+    }
+}
+
+pub async fn run(events: UnboundedReceiver<IconEvent>, control: TrayControl) -> anyhow::Result<()> {
+    run_with(events, control, BridgeOptions::default()).await
+}
+
+pub async fn run_with(
     mut events: UnboundedReceiver<IconEvent>,
     control: TrayControl,
+    options: BridgeOptions,
 ) -> anyhow::Result<()> {
     let mut items: HashMap<IconId, PublishedItem> = HashMap::new();
     let mut seq: u64 = 0;
@@ -77,7 +97,7 @@ pub async fn run(
                         if matches!(event, IconEvent::SelectionLost) {
                             break;
                         }
-                        handle_event(event, &mut items, &mut seq, &control).await;
+                        handle_event(event, &mut items, &mut seq, &control, &options).await;
                     }
                     None => break,
                 }
@@ -102,9 +122,18 @@ async fn handle_event(
     items: &mut HashMap<IconId, PublishedItem>,
     seq: &mut u64,
     control: &TrayControl,
+    options: &BridgeOptions,
 ) {
     match event {
         IconEvent::Added { meta, image } => {
+            if options.ignores(&meta.app_id) {
+                info!(
+                    icon = format_args!("{:#010x}", meta.id),
+                    app = %meta.app_id,
+                    "not publishing icon: app id is ignored"
+                );
+                return;
+            }
             add_item(meta, image, items, seq, control).await;
         }
         IconEvent::Updated { id, image } => {

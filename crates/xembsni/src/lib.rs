@@ -13,6 +13,7 @@ use std::thread;
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
+use xembsni_bridge::BridgeOptions;
 use xembsni_tray_host::{IconEvent, TrayHost};
 
 const HELP: &str = "\
@@ -22,25 +23,60 @@ USAGE:
     xembsni [OPTIONS]
 
 OPTIONS:
-    -h, --help       Print this help and exit
-    -V, --version    Print version and exit
+    -h, --help             Print this help and exit
+    -V, --version          Print version and exit
+        --ignore <app-ids> Never publish icons whose app id (WM_CLASS) is in
+                           this comma-separated list; may be repeated.
+                           For apps the desktop keeps out of the tray on
+                           purpose, e.g. --ignore fcitx
 
 The daemon runs in the foreground and logs to stderr. Set RUST_LOG to control
 verbosity (e.g. RUST_LOG=debug). It exits cleanly on SIGINT/SIGTERM.
 ";
 
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Options {
+    ignore: Vec<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 enum CliAction {
     Help,
     Version,
+    Run(Options),
 }
 
-fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<CliAction>, String> {
-    match args.next().as_deref() {
-        None => Ok(None),
-        Some("-h" | "--help") => Ok(Some(CliAction::Help)),
-        Some("-V" | "--version") => Ok(Some(CliAction::Version)),
-        Some(other) => Err(format!("unknown argument: {other}")),
+fn parse_args(args: impl Iterator<Item = String>) -> Result<CliAction, String> {
+    let mut options = Options::default();
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        // Accept both `--flag value` and `--flag=value`.
+        let (flag, inline) = match arg.split_once('=') {
+            Some((flag, value)) if flag.starts_with("--") => {
+                (flag.to_string(), Some(value.to_string()))
+            }
+            _ => (arg.clone(), None),
+        };
+        let mut value = |name: &str| -> Result<String, String> {
+            inline
+                .clone()
+                .or_else(|| args.next())
+                .ok_or_else(|| format!("{name} needs a value"))
+        };
+        match flag.as_str() {
+            "-h" | "--help" => return Ok(CliAction::Help),
+            "-V" | "--version" => return Ok(CliAction::Version),
+            "--ignore" => options.ignore.extend(
+                value("--ignore")?
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .map(String::from),
+            ),
+            other => return Err(format!("unknown argument: {other}")),
+        }
     }
+    Ok(CliAction::Run(options))
 }
 
 /// Build the Tokio runtime and run the daemon to completion.
@@ -48,28 +84,28 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<CliAction
 /// Async is used only at the outer lifecycle boundary (signals and D-Bus). The
 /// X11 event loop is synchronous and runs on a dedicated thread.
 pub fn run() -> anyhow::Result<()> {
-    match parse_args(std::env::args().skip(1)) {
-        Ok(Some(CliAction::Help)) => {
+    let options = match parse_args(std::env::args().skip(1)) {
+        Ok(CliAction::Help) => {
             print!("{HELP}");
             return Ok(());
         }
-        Ok(Some(CliAction::Version)) => {
+        Ok(CliAction::Version) => {
             println!("xembsni {}", env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
-        Ok(None) => {}
+        Ok(CliAction::Run(options)) => options,
         Err(err) => {
             eprintln!("{err}\n\n{HELP}");
             std::process::exit(2);
         }
-    }
+    };
 
     init_tracing();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    runtime.block_on(async_main())
+    runtime.block_on(async_main(options))
 }
 
 fn init_tracing() {
@@ -80,8 +116,11 @@ fn init_tracing() {
         .init();
 }
 
-async fn async_main() -> anyhow::Result<()> {
+async fn async_main(options: Options) -> anyhow::Result<()> {
     info!(version = env!("CARGO_PKG_VERSION"), "starting xembsni");
+    if !options.ignore.is_empty() {
+        info!(ignore = ?options.ignore, "icons of these app ids will not be published");
+    }
 
     // Acquire the X11 tray selection before anything else — fail fast if
     // another tray owns it.
@@ -102,7 +141,10 @@ async fn async_main() -> anyhow::Result<()> {
             })
         })?;
 
-    let mut bridge = tokio::spawn(xembsni_bridge::run(rx, control));
+    let bridge_options = BridgeOptions {
+        ignore: options.ignore,
+    };
+    let mut bridge = tokio::spawn(xembsni_bridge::run_with(rx, control, bridge_options));
 
     let mut sigterm = signal(SignalKind::terminate())?;
     let mut sigint = signal(SignalKind::interrupt())?;
@@ -137,5 +179,46 @@ fn report_bridge(result: Result<anyhow::Result<()>, tokio::task::JoinError>) {
         Ok(Err(err)) => error!(%err, "bridge exited with an error"),
         Err(err) if err.is_cancelled() => {}
         Err(err) => error!(%err, "bridge task panicked"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<CliAction, String> {
+        parse_args(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn no_arguments_runs_with_defaults() {
+        assert_eq!(parse(&[]), Ok(CliAction::Run(Options::default())));
+    }
+
+    #[test]
+    fn help_and_version_win_over_everything_else() {
+        assert_eq!(parse(&["--ignore", "fcitx", "-h"]), Ok(CliAction::Help));
+        assert_eq!(parse(&["-V"]), Ok(CliAction::Version));
+    }
+
+    #[test]
+    fn ignore_accepts_lists_and_repeats_in_both_spellings() {
+        let parsed = parse(&["--ignore", "fcitx, Steam", "--ignore=wine"]);
+        assert_eq!(
+            parsed,
+            Ok(CliAction::Run(Options {
+                ignore: vec!["fcitx".into(), "Steam".into(), "wine".into()],
+            }))
+        );
+    }
+
+    #[test]
+    fn ignore_needs_a_value() {
+        assert!(parse(&["--ignore"]).is_err());
+    }
+
+    #[test]
+    fn unknown_arguments_are_rejected() {
+        assert!(parse(&["--bogus"]).is_err());
     }
 }
