@@ -7,7 +7,6 @@
 //! the user's real pointer.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use tracing::debug;
 use x11rb::connection::Connection;
@@ -17,10 +16,6 @@ use x11rb::protocol::xproto::{
 use x11rb::rust_connection::RustConnection;
 
 use crate::{IconId, Result};
-
-/// How long an icon stays slid under the interaction point after a click, so
-/// the app has time to ask the server where its icon is before placing a menu.
-const PARK_DURATION: Duration = Duration::from_millis(400);
 
 /// X11 button numbers.
 const BUTTON_LEFT: u8 = 1;
@@ -177,13 +172,17 @@ impl TrayControl {
         // of its own (Hyprland then shows it and counts it on a workspace), so
         // slide the icon *within* the container instead, so that its root
         // coordinates land on the interaction point. The container clips it,
-        // nothing shows, and the compositor never hears of it. It slides back
-        // once the app has had time to read the position.
-        let slid = self.slide_icon_to(
+        // nothing shows, and the compositor never hears of it. It stays there
+        // until the next interaction moves it again: an app may read the
+        // position at any time while it handles the click, and the capture
+        // reads the redirected window's own pixmap, which the move leaves alone.
+        if !self.slide_icon_to(
             icon,
             i32::from(rx) - i32::from(ex),
             i32::from(ry) - i32::from(ey),
-        );
+        ) {
+            debug!(icon = format_args!("{icon:#010x}"), "icon not slid");
+        }
 
         // Toolkits select button events on the widget that draws the icon, not
         // on the toplevel they docked (Java AWT's tray canvas is a child window
@@ -228,14 +227,6 @@ impl TrayControl {
             "sent click"
         );
 
-        if slid {
-            let conn = Arc::clone(&self.conn);
-            std::thread::spawn(move || {
-                std::thread::sleep(PARK_DURATION);
-                let _ = conn.configure_window(icon, &ConfigureWindowAux::new().x(0).y(0));
-                let _ = conn.flush();
-            });
-        }
         Ok(())
     }
 
