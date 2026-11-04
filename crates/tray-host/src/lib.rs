@@ -22,11 +22,16 @@ mod control;
 mod host;
 mod image;
 
-pub use control::TrayControl;
+pub use control::{MenuAnchor, TrayControl};
 pub use host::{TrayHost, Waker};
 
 /// Identifier for a docked icon: its X11 window id.
 pub type IconId = u32;
+
+/// Where embedded containers live: far offscreen so no compositor shows them.
+/// Containers never move; for a click, `TrayControl` slides the icon within
+/// its container instead (see `control.rs`).
+pub(crate) const OFFSCREEN: i16 = -16000;
 
 /// A captured icon image in ARGB32 (`[A, R, G, B]` per pixel), row-major.
 #[derive(Clone, PartialEq, Eq)]
