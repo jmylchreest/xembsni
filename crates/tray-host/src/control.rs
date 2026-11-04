@@ -3,8 +3,7 @@
 //! This runs on its own X11 connection so it can be used from async tasks
 //! (the SNI side) without touching the blocking host event loop. Interactions
 //! are delivered as synthetic `ButtonPress`/`ButtonRelease` events sent
-//! directly to the icon window — the least-invasive approach that doesn't warp
-//! the user's real pointer.
+//! to the listening icon widget. Pointer warping for menu placement is best-effort.
 
 use std::sync::Arc;
 
@@ -63,6 +62,7 @@ pub struct TrayControl {
     /// `_NET_WORKAREA`: the screen minus panels, published by EWMH-aware WMs
     /// (Hyprland's Xwayland does, with the bar's strip excluded).
     workarea_atom: u32,
+    current_desktop_atom: u32,
     menu_anchor: MenuAnchor,
 }
 
@@ -80,11 +80,16 @@ impl TrayControl {
         let root = screen.root;
         let screen_size = (screen.width_in_pixels, screen.height_in_pixels);
         let workarea_atom = conn.intern_atom(false, b"_NET_WORKAREA")?.reply()?.atom;
+        let current_desktop_atom = conn
+            .intern_atom(false, b"_NET_CURRENT_DESKTOP")?
+            .reply()?
+            .atom;
         Ok(Self {
             conn: Arc::new(conn),
             root,
             screen_size,
             workarea_atom,
+            current_desktop_atom,
             menu_anchor: MenuAnchor::default(),
         })
     }
@@ -131,7 +136,7 @@ impl TrayControl {
     /// Send a press+release of `button` on the icon window. `root_x`/`root_y`
     /// are the interaction's screen coordinates (from the SNI host) so the app
     /// can place any resulting menu correctly; if zero we fall back to the
-    /// window centre.
+    /// configured menu anchor.
     fn click(&self, icon: IconId, button: u8, root_x: i32, root_y: i32) -> Result<()> {
         // Ask the server for the icon's current size so we click its centre.
         let (w, h) = match self.conn.get_geometry(icon)?.reply() {
@@ -216,9 +221,8 @@ impl TrayControl {
         };
         release.state = held.into();
 
-        let mask = EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE;
-        self.conn.send_event(true, target, mask, press)?;
-        self.conn.send_event(true, target, mask, release)?;
+        self.send_button(icon, press, EventMask::BUTTON_PRESS)?;
+        self.send_button(icon, release, EventMask::BUTTON_RELEASE)?;
         self.conn.flush()?;
         debug!(
             icon = format_args!("{icon:#010x}"),
@@ -228,6 +232,41 @@ impl TrayControl {
         );
 
         Ok(())
+    }
+
+    // SendEvent propagates the payload unchanged. Resolve each event's listener
+    // ourselves so decorative children do not leave the parent handling an
+    // event addressed to the wrong window, with the wrong local coordinates.
+    fn send_button(
+        &self,
+        icon: IconId,
+        mut event: ButtonPressEvent,
+        mask: EventMask,
+    ) -> Result<()> {
+        let source = event.event;
+        let (x, y) = (event.event_x, event.event_y);
+        loop {
+            let attrs = self.conn.get_window_attributes(event.event)?.reply()?;
+            if attrs.all_event_masks.contains(mask) {
+                let point = self
+                    .conn
+                    .translate_coordinates(source, event.event, x, y)?
+                    .reply()?;
+                event.event_x = point.dst_x;
+                event.event_y = point.dst_y;
+                self.conn.send_event(false, event.event, mask, event)?;
+                return Ok(());
+            }
+            if event.event == icon || attrs.do_not_propagate_mask.contains(mask) {
+                return Ok(());
+            }
+            let parent = self.conn.query_tree(event.event)?.reply()?.parent;
+            if parent == x11rb::NONE || parent == self.root {
+                return Ok(());
+            }
+            event.child = event.event;
+            event.event = parent;
+        }
     }
 
     /// Move `icon` inside its container so that the icon's origin lands on
@@ -293,8 +332,8 @@ impl TrayControl {
         (x.clamp(0, limit) as i16, y.clamp(0, limit) as i16)
     }
 
-    /// The usable screen in root coordinates: `_NET_WORKAREA` of the first
-    /// desktop when the WM publishes it, else the whole screen.
+    /// The usable screen in root coordinates for the current desktop, or the
+    /// whole screen if the WM does not publish a valid work area.
     fn work_area(&self) -> (i32, i32, i32, i32) {
         let whole = (
             0,
@@ -302,12 +341,29 @@ impl TrayControl {
             i32::from(self.screen_size.0),
             i32::from(self.screen_size.1),
         );
+        let desktop = self
+            .conn
+            .get_property(
+                false,
+                self.root,
+                self.current_desktop_atom,
+                AtomEnum::CARDINAL,
+                0,
+                1,
+            )
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .and_then(|reply| reply.value32().and_then(|mut values| values.next()))
+            .unwrap_or(0);
+        let Some(offset) = desktop.checked_mul(4) else {
+            return whole;
+        };
         let Ok(cookie) = self.conn.get_property(
             false,
             self.root,
             self.workarea_atom,
             AtomEnum::CARDINAL,
-            0,
+            offset,
             4,
         ) else {
             return whole;
@@ -344,3 +400,6 @@ impl TrayControl {
         (tree.parent != self.root && tree.parent != x11rb::NONE).then_some(tree.parent)
     }
 }
+
+#[cfg(test)]
+mod tests;
